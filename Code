@@ -1,0 +1,376 @@
+#include <Servo.h>                           // Include servo library
+ 
+Servo servoLeft;                             // Declare left and right servos
+Servo servoRight;
+ 
+const int ServoLeftPin = 13;                 // I/O pin constants 
+const int ServoRightPin = 12;
+const int IrDetLeftPin = 10;
+const int IrDetPin = 10;
+const int IrLedLeftPin = 9;
+const int LedLeftPin = 8;   
+const int LedRightPin = 7;
+const int BeeperPin = 4;
+const int IrDetRightPin = 3;
+const int IrLedRightPin = 2;
+
+
+const byte Enter = 11;                       // Non-alpha remote button constants
+const byte ChUp = 16;
+const byte ChDn = 17;
+const byte VolUp = 18;
+const byte VolDn = 19;
+const byte Power = 21;
+
+const int setpoint = 2;                      // Target distances
+const int kpl = -50;                         // Proportional control constants 
+const int kpr = -50;
+ 
+int irPulse;                                 // Stores pulses from IR detector
+int remoteCode;                              // Stores code from remote
+int mode = 1;                                // Stores mode
+
+void setup()                                 // Setup runs once then loop takes over
+{
+  tone(BeeperPin, 3000, 1000);               // Play tone for 1 second
+  delay(1000);                               // Delay to finish tone
+  
+  pinMode(LedLeftPin, OUTPUT);               // Indicator LEDs
+  pinMode(LedRightPin, OUTPUT);
+
+  Serial.begin(9600);
+}
+
+void loop()                                  // Auto-repeats after setup
+{
+  int remoteCode = GetIrCode();              // Get code from remote
+
+  Serial.print("remoteCode = ");
+  Serial.println(remoteCode);
+  
+  if(remoteCode == -1)                       // If nothing, detach servos
+  {
+    if((servoLeft.attached()==true) && (servoRight.attached()==true))
+    {
+      servoLeft.detach();
+      servoRight.detach();
+    }
+  }
+  else                                       // Otherwise, remote code received,
+  {                                          // so attach/re-attach them.
+    if((servoLeft.attached()==false) && (servoRight.attached()==false))
+    {
+      servoLeft.attach(ServoLeftPin);
+      servoRight.attach(ServoRightPin);
+    }
+  }  
+  delay(10); 
+  
+  int irl=irDetect(IrLedLeftPin, IrDetLeftPin, 38000);                
+  delay(1);                                  
+  int irr=irDetect(IrLedRightPin,  IrDetRightPin, 38000);            
+
+  switch(remoteCode)                         
+  {
+    case 1:                                  // 1 -> pivot left
+      if(irr==0)                             // Stay still & complain if object on left
+      {
+        maneuver(0, 0);                      // Stop UFN
+        digitalWrite(LedRightPin, HIGH);
+        tone(BeeperPin, 4500, 20);
+        delay(50);
+        digitalWrite(LedRightPin, LOW);
+        delay(50);
+      }
+      else                           
+      {
+        maneuver(0, 200, 20);        
+      }  
+      break;                           
+      
+    case 2:                             
+    case ChUp:                          
+      if((irl == 0)&&(irr==0))       
+      {
+        maneuver(0, 0);
+        digitalWrite(LedLeftPin, HIGH);
+        digitalWrite(LedRightPin, HIGH);
+        tone(BeeperPin, 4500, 20);
+        delay(50);
+        digitalWrite(LedLeftPin, LOW);
+        digitalWrite(LedRightPin, LOW);
+        delay(50);
+      }
+      else                             
+      {
+        maneuver(200, 200, 20);
+      }  
+      break;
+      
+    case 3:                       
+      if(irl==0)                      
+      {
+        maneuver(0, 0);
+        digitalWrite(LedLeftPin, HIGH);
+        tone(BeeperPin, 4500, 20);
+        delay(50);
+        digitalWrite(LedLeftPin, LOW);
+        delay(50);
+      }
+      else                          
+      {
+        maneuver(200, 0, 20);          
+      }  
+      break;
+      
+    case 4:                        
+    case VolDn:                      
+      maneuver(-200, 200, 20);        
+      break;
+      
+    case 5:                        
+      maneuver(0, 0, 20);       
+      break;
+      
+    case 6:                                // 6 button pressed
+    case VolUp:                            // or volume up button pressed
+      maneuver(200, -200, 20);             // Rotate right in place at least 20 ms
+      break;
+      
+    case 7:                                // 7 button pressed
+      maneuver(0, -200, 20);               // Pivot backward-left for at least 20 ms
+      break;
+      
+    case 8:                                // 8 button pressed
+    case ChDn:                             // or channel down button pressed
+      maneuver(-200, -200, 20);            // Back up for at least 20 ms
+      break;
+      
+    case 9:                                // 9 button pressed
+      maneuver(-200, -0, 20);              // Pivot backward-right for at least 20 ms
+      break;
+      
+    case Power:                            
+      mode = -1;                           // Clear current mode  
+      servoLeft.detach();                  // Stop servos
+      servoRight.detach();
+      tone(BeeperPin, 3500, 100);          // Beep to indicate first button pressed
+      delay(200);                          // Wait for beep + 100 more ms pause
+
+      do                                   // Wait for valid IR code
+      {
+        mode = GetIrCode();
+      }while((mode == -1) || (mode == Power)); 
+      tone(BeeperPin, 3500, 100);          // Beep twice for second button press
+      delay(200);
+      tone(BeeperPin, 3500, 100);
+      delay(200);
+      
+      switch(mode)                         // Select function based on mode selection
+      {
+        case 2:                            // Mode = 2?  Call roam
+          roam();
+          break;
+        case 3:                            // Mode = 3?  Call follow
+          follow();
+          break;
+        case 6:                            // Mode = 3?  Call follow
+          sniff();
+          break;
+        default:                           // Mode = anything else?  Mode = IR remote controlled
+          mode = 1;
+          break;
+      }
+    default:                               
+      servoLeft.detach();                
+      servoRight.detach();
+      break;
+  }   
+}                                          // Loop function auto-repeats at this point
+
+void roam()
+{
+  int irCode = -1;                               // Declare IR variable
+  servoLeft.attach(ServoLeftPin);                // Attach servos
+  servoRight.attach(ServoRightPin);
+  while(irCode == -1)                            // Roaming loop
+  {
+    irCode = GetIrCode();                        // Check IR code
+    if(irCode==-1)                               // If timeout (-1), keep roaming
+    {
+      int irLeft = irDetect(IrLedLeftPin, IrDetLeftPin, 38000);       // Check for object on left
+      int irRight = irDetect(IrLedRightPin, IrDetRightPin, 38000);       // Check for object on right
+
+      if((irLeft == 0) && (irRight == 0))        // If both sides detect
+      {
+        maneuver(-200, -200, 1);                 // Backward 20 milliseconds
+      }
+      else if(irLeft == 0)                       // If only left side detects
+      {
+        maneuver(200, -200, 1);                  // Right for 20 ms
+      }
+      else if(irRight == 0)                      // If only right side detects
+      {
+        maneuver(-200, 200, 1);                  // Left for 20 ms
+      }
+      else                                       // Otherwise, no IR detects
+      {
+        maneuver(200, 200, 1);                   // Forward 20 ms
+      }
+    }                               
+    else                                         // Else if incoming IR code
+    {
+      mode = 1;                                  // Set mode to 1
+      digitalWrite(LedLeftPin, LOW);             // Turn off lights
+      digitalWrite(LedRightPin, LOW);
+      return;                                    // Return to loop function
+    }
+  }  
+} 
+
+
+void sniff()
+{
+  servoLeft.attach(ServoLeftPin);                // Attach servos
+  servoRight.attach(ServoRightPin);
+  while(1)                                       // Roaming loop
+  {
+      int irLeft = digitalRead(IrDetLeftPin);       // Check for object on left
+      int irRight = digitalRead(IrLedRightPin);       // Check for object on right
+
+      if(irLeft == 0)                       // If only left side detects
+      {
+        tone(BeeperPin, 3000, 500);               // Play tone for 1 second
+      }
+      if(irRight == 0)                      // If only right side detects
+      {
+        tone(BeeperPin, 4000, 500);               // Play tone for 1 second
+      }
+      delay(500);                               // Delay to finish tone
+  }  
+} 
+
+void follow()                                       
+{
+  int irCode = -1;                               // Declare IR code variable
+  servoLeft.attach(ServoLeftPin);                          // Attach servos
+  servoRight.attach(ServoRightPin);
+
+  while(irCode == -1)                            
+  {
+    irCode = GetIrCode();                        // Check for IR code
+    if(irCode==-1)                               // If timeout (-1), then follow
+    {
+      // Measure left and right distances.
+      int irLeft = irDistance(IrLedLeftPin, IrDetLeftPin);     
+      int irRight = irDistance(IrLedRightPin, IrDetRightPin);
+  
+      // Left and right proportional control calculations
+      int driveLeft = (setpoint - irLeft) * kpl;     
+      int driveRight = (setpoint - irRight) * kpr;
+  
+      maneuver(driveLeft, driveRight, 1);       // drive levels set speeds
+    }
+    else                                        // If incoming remote code
+    {
+      mode = 1;                                 // Set mode to 1 (remote controlled)
+      digitalWrite(LedLeftPin, LOW);            // Turn lights off
+      digitalWrite(LedRightPin, LOW);
+      return;                                   // Return to loop function
+    }
+    delay(20);
+  }  
+} 
+
+int irDistance(int irLedPin, int irReceivePin)
+{  
+  int distance = 0;
+  for(long f = 38000; f <= 42000; f += 1000) {
+    distance += irDetect(irLedPin, irReceivePin, f);
+    //delay(5);
+  }
+  return distance;
+}
+
+int irDetect(int irLedPin, int irReceiverPin, long frequency)
+{
+  tone(irLedPin, frequency, 8);              // IRLED 38 kHz for at least 1 ms
+  delay(1);                                  // Wait 1 ms
+  int ir = digitalRead(irReceiverPin);       // IR receiver -> ir variable
+  if(irLedPin==IrLedLeftPin)                            // If left IR check
+  { 
+    if(ir==0)                                // If object detected
+    {
+      digitalWrite(LedLeftPin, HIGH);        // ..then turn on left LED
+    }
+    else                                     // If no object
+    {
+      digitalWrite(LedLeftPin, LOW);         // ..then turn off left LED
+    }
+  }
+  if(irLedPin==IrLedRightPin)                // Repeat process for right LED
+  { 
+    if(ir==0)
+    {
+      digitalWrite(LedRightPin, HIGH);
+    }
+    else
+    {
+      digitalWrite(LedRightPin, LOW);
+    }
+  }
+  delay(1);                                  // Down time before recheck
+  return ir;                                 // Return 1 no detect, 0 detect
+}     
+
+int GetIrCode(){
+  unsigned long irPulse = -1;                // Local variables    
+  int irCode = 0;
+  do{
+    if((mode==3)||(mode==2)) irPulse = pulseIn(IrDetPin, LOW, 15000); else irPulse = pulseIn(IrDetPin, LOW, 50000); 
+     
+    if(irPulse==0) return -1;
+  }while((irPulse <= 2000) || (irPulse >= 2800));
+  
+  Serial.println(irPulse, DEC);
+
+  
+  for(int i = 0; i <= 6; i++)
+  {
+    irPulse = pulseIn(IrDetPin, LOW, 2000);
+    if((irPulse > 1000) && (irPulse < 1400)) bitSet(irCode, i);
+    
+    Serial.println(irPulse, DEC);
+    
+  }
+
+  if(irCode <= 9) irCode++;
+  if(irCode == 10) irCode = 0;
+
+  
+  Serial.print("IR=");
+  Serial.println(irCode);
+
+  //delay(500);
+  
+  return irCode;
+}
+
+void maneuver(int speedLeft, int speedRight)
+{
+  maneuver(speedLeft, speedRight, 1);              
+}
+
+void maneuver(int speedLeft, int speedRight, int msTime)
+{
+  servoLeft.writeMicroseconds(1500 + speedLeft);   // Set Left servo speed
+  servoRight.writeMicroseconds(1500 - speedRight); // Set right servo speed
+  if(msTime==-1)                                   // if msTime = -1
+  {                                  
+    servoLeft.detach();                            // Stop servo signals
+    servoRight.detach();   
+  }
+  delay(msTime);                                   // Delay for msTime
+}
+
+  
